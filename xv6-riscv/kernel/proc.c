@@ -231,7 +231,7 @@ userinit(void)
   release(&p->lock);
 }
 
-// Shrink user memory by n bytes.
+// Grow or shrink user memory by n bytes.
 // Return 0 on success, -1 on failure.
 int
 growproc(int n)
@@ -241,6 +241,9 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
+    if(sz + n > TRAPFRAME) {
+      return -1;
+    }
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
     }
@@ -266,7 +269,7 @@ kfork(void)
   }
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(uvmcopy_cow(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
     release(&np->lock);
     return -1;

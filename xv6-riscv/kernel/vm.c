@@ -322,6 +322,43 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   uvmunmap(new, 0, i / PGSIZE, 1);
   return -1;
 }
+// copy-on-write implementation of umvcopy, where the child process
+// gets the same physical pages as it's parents via mapping
+int
+uvmcopy_cow(pagetable_t old, pagetable_t new, uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  char *mem;
+
+  for(i = 0; i < sz; i += PGSIZE){ // i is the virtual address
+    if((pte = walk(old, i, 0)) == 0)
+      continue;   // page table entry hasn't been allocated
+
+    if((*pte & PTE_V) == 0)
+      continue;   // physical page hasn't been allocated
+
+    pa = PTE2PA(*pte);
+
+    if((*pte & PTE_W)) // check if PTE_W is enabled
+      *pte = (*pte & ~PTE_W); // change PTE_W before grabbing flag
+
+    *pte |= PTE_COW; // mark as copy-on-write
+    sfence_vma(); // flush TLB so page is now clearly not writable
+
+    flags = PTE_FLAGS(*pte); // grab flags from parent
+    
+    if (mappages(new, i, PGSIZE, pa, flags) != 0)
+            goto err;
+
+  }
+  return 0;
+
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
 
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
@@ -453,18 +490,49 @@ uint64
 vmfault(pagetable_t pagetable, uint64 va, int read)
 {
   uint64 mem;
+  pte_t *pte;
   struct proc *p = myproc();
 
   if (va >= p->sz)
     return 0;
+    
   va = PGROUNDDOWN(va);
-  if(ismapped(pagetable, va)) {
-    return 0;
+
+  if((pte = walk(pagetable, va, 0)) == 0) // check if the page table entry exists
+    return 0; // doesn't exist
+
+  if((*pte & PTE_COW)) { // check if the page is COW
+      // check if the page is read-only
+    if((*pte & PTE_R) && !(*pte & PTE_W)) {
+        // if the page is a COW page and is read-only, kill the process
+        kill(p->pid);
+        return 0;  // return since process is killed
+    }
+    uint64 old_pa = PTE2PA(*pte); // get the physical address of the page
+
+    mem = (uint64) kalloc(); // allocate a new page for the process that is writing
+    if (mem == 0)
+      return 0;  // out of memory
+
+    memmove((void *)mem, (void *)old_pa, PGSIZE); // copy the content of the old page to the new page
+
+    uint flags = PTE_FLAGS(*pte);  // get the existing flags (e.g., PTE_U)
+    flags |= PTE_W;  // mark it as writable
+
+    if (mappages(pagetable, va, PGSIZE, mem, flags) != 0) { // map the new page in the page table of the writing process
+      kfree((void *)mem);
+      return 0;  // mapping failed, clean up
+    }
+    
+    sfence_vma(); // flush the TLB
+
   }
-  mem = (uint64) kalloc();
+  
   if(mem == 0)
     return 0;
+
   memset((void *) mem, 0, PGSIZE);
+
   if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
     kfree((void *)mem);
     return 0;
