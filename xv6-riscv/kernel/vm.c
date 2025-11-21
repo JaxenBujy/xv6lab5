@@ -7,6 +7,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
+#include "kalloc.c"
 
 /*
  * the kernel's page table.
@@ -339,16 +340,20 @@ uvmcopy_cow(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       continue;   // physical page hasn't been allocated
 
-    pa = PTE2PA(*pte);
+    pa = PTE2PA(*pte); // get the phyiscal address
 
-    if((*pte & PTE_W)) // check if PTE_W is enabled
-      *pte = (*pte & ~PTE_W); // change PTE_W before grabbing flag
+    if((*pte & PTE_W)){ // check if PTE_W is enabled/set to 1
+      *pte &= PTE_W; // change PTE_W to 0 before grabbing flag
+      *pte |= PTE_COW; // mark as COW, meaning the page is not read-only
+    }
+    else
+        *pte &= ~PTE_COW; // ensuring COW bit is set to 0, showing page is read-only
 
-    *pte |= PTE_COW; // mark as copy-on-write
     sfence_vma(); // flush TLB so page is now clearly not writable
 
     flags = PTE_FLAGS(*pte); // grab flags from parent
-    
+    int index = pa / PGSIZE;  // get the index in the ref_count array
+    ref_count[index]++;  // increment the reference count for this page
     if (mappages(new, i, PGSIZE, pa, flags) != 0)
             goto err;
 
@@ -501,14 +506,10 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   if((pte = walk(pagetable, va, 0)) == 0) // check if the page table entry exists
     return 0; // doesn't exist
 
-  if((*pte & PTE_COW)) { // check if the page is COW
-      // check if the page is read-only
-    if((*pte & PTE_R) && !(*pte & PTE_W)) {
-        // if the page is a COW page and is read-only, kill the process
-        kill(p->pid);
-        return 0;  // return since process is killed
-    }
+  if((*pte & PTE_COW)) { // check if the page is COW, meaning not read-only
     uint64 old_pa = PTE2PA(*pte); // get the physical address of the page
+    int index = old_pa / PGSIZE;  // get the index in the ref_count array
+    ref_count[index]--;  // decrement the reference count for this page
 
     mem = (uint64) kalloc(); // allocate a new page for the process that is writing
     if (mem == 0)
@@ -517,26 +518,22 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     memmove((void *)mem, (void *)old_pa, PGSIZE); // copy the content of the old page to the new page
 
     uint flags = PTE_FLAGS(*pte);  // get the existing flags (e.g., PTE_U)
+    flags &= ~PTE_COW;  // clear the COW bit
     flags |= PTE_W;  // mark it as writable
 
     if (mappages(pagetable, va, PGSIZE, mem, flags) != 0) { // map the new page in the page table of the writing process
       kfree((void *)mem);
       return 0;  // mapping failed, clean up
     }
-    
+
     sfence_vma(); // flush the TLB
-
   }
-  
-  if(mem == 0)
-    return 0;
-
-  memset((void *) mem, 0, PGSIZE);
-
-  if (mappages(p->pagetable, va, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
-    kfree((void *)mem);
-    return 0;
+  else{
+    if ((*pte & PTE_COW) == 0) {
+      kill(p->pid);  // kill process if it's trying to write to a read-only page
+    }
   }
+
   return mem;
 }
 

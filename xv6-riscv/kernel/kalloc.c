@@ -9,6 +9,10 @@
 #include "riscv.h"
 #include "defs.h"
 
+#define MAX_PAGES (PHYSTOP / PGSIZE)  // number of physical pages available
+
+int ref_count[MAX_PAGES]; // reference count array to track how many processes reference each page
+
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
@@ -56,6 +60,15 @@ kfree(void *pa)
 
   r = (struct run*)pa;
 
+   // decrement the reference count of the page since page is being freed
+  int index = (uint64)pa / PGSIZE;  // calculate the index in the ref_count array
+  ref_count[index]--;  // decrement the reference count
+
+  
+  if (ref_count[index] > 0) { // if the reference count is greater than 0, don't free the page
+    return;  // the page is still in use by other processes
+  }
+
   acquire(&kmem.lock);
   r->next = kmem.freelist;
   kmem.freelist = r;
@@ -69,6 +82,7 @@ void *
 kalloc(void)
 {
   struct run *r;
+  uint64 pa;  // variable to hold the physical address of the page
 
   acquire(&kmem.lock);
   r = kmem.freelist;
@@ -76,7 +90,14 @@ kalloc(void)
     kmem.freelist = r->next;
   release(&kmem.lock);
 
-  if(r)
-    memset((char*)r, 5, PGSIZE); // fill with junk
+  if(r) {
+    memset((char*)r, 5, PGSIZE);  // Fill with junk
+
+    pa = (uint64)r;  // the physical address of the allocated page
+    int index = pa / PGSIZE;  // calculate the index into the ref_count array
+
+    ref_count[index] = 1;  // set the reference count of this page to 1
+
+  }
   return (void*)r;
 }
