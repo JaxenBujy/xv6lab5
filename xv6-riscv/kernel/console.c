@@ -9,7 +9,6 @@
 //   control-p -- print process list
 //
 
-#include <stdarg.h>
 
 #include "types.h"
 #include "param.h"
@@ -21,6 +20,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "proc.h"
+#include <stdarg.h>
 
 #define BACKSPACE 0x100  // erase the last output character
 #define C(x)  ((x)-'@')  // Control-x

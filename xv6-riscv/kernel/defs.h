@@ -59,6 +59,7 @@ void            ireclaim(int);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+extern int ref_count[];
 
 // log.c
 void            initlog(int, struct superblock*);

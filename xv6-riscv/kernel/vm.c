@@ -7,7 +7,6 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
-#include "kalloc.c"
 
 /*
  * the kernel's page table.
@@ -331,7 +330,6 @@ uvmcopy_cow(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){ // i is the virtual address
     if((pte = walk(old, i, 0)) == 0)
@@ -386,6 +384,8 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;
+  char *mem; // new physical page when breaking COW
+  uint64 flags;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -401,9 +401,44 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
     pte = walk(pagetable, va0, 0);
     // forbid copyout over read-only user text pages.
-    if((*pte & PTE_W) == 0)
+    if(pte == 0 || (*pte & PTE_W) == 0 || (*pte & PTE_U) == 0)
       return -1;
-      
+    
+    // If this pte is not writable, it might either be:
+    // 1) a true read-only, so throw an error
+    // 2) a cow, so need to break cow before writing
+
+    if ((*pte & PTE_W) == 0) { // if not writable
+      if ((*pte & PTE_COW) == 0) { // if not cow, return -1
+        return -1;
+      }
+
+      // it is a cow page, so need to break cow
+      uint64 oldpa = PTE2PA(*pte);
+
+      // allocate new physical page
+      mem = kalloc();
+      if (mem == 0)
+        return -1; // out of memory
+
+      // copy contents of old page into new page
+      memmove(mem, (char*)oldpa, PGSIZE);
+
+      // drop reference to old physical page
+      kfree((void*)oldpa);
+
+      // make new flags for the new entry
+      flags = PTE_FLAGS(*pte);
+      flags |= PTE_W;
+      flags &= ~PTE_COW;
+
+      // point new pte to the private writable page
+      *pte = PA2PTE((uint64)mem) | flags;
+
+      // now pa0 points to the new physical page
+      pa0 = (uint64)mem;
+    }
+
     n = PGSIZE - (dstva - va0);
     if(n > len)
       n = len;
@@ -530,7 +565,7 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   }
   else{
     if ((*pte & PTE_COW) == 0) {
-      kill(p->pid);  // kill process if it's trying to write to a read-only page
+      kkill(p->pid);  // kill process if it's trying to write to a read-only page
     }
   }
 
